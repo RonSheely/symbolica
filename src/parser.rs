@@ -6,10 +6,11 @@
 //! [Token::to_polynomial], [Token::to_rational_polynomial] or [Token::to_factorized_rational_polynomial] for accelerated parsing of polynomials written
 //! in Symbolica's fast format.
 
-use std::{borrow::Cow, fmt::Write, string::String, sync::Arc};
+use std::{borrow::Cow, fmt::Write, str::Chars, string::String, sync::Arc};
 
 use ahash::HashMap;
 use bytes::Buf;
+use colored::{Color, Colorize, control::ShouldColorize};
 use rug::Integer as MultiPrecisionInteger;
 
 use smallvec::SmallVec;
@@ -520,6 +521,14 @@ impl Token {
             Ok(())
         } else if let Token::Number(n, _) = other {
             Err(format!("operator expected between '{self}' and '{n}'"))
+        } else if let Token::OpenParenthesis = self {
+            // reached EOF
+            Err(format!("parenthesis not closed"))
+        } else if let Token::Fn(_, _, a) = self {
+            Err(format!(
+                "missing closing parenthesis for function '{}'",
+                a[0]
+            ))
         } else {
             Err(format!(
                 "operator expected, but found '{self}'. Are parentheses unbalanced?"
@@ -1085,6 +1094,48 @@ impl Token {
         }
     }
 
+    /// Format an error message with context.
+    fn format_error_context(
+        message: &str,
+        line: usize,
+        column: usize,
+        input: &str,
+        char_iter: Chars<'_>,
+    ) -> String {
+        const CONTEXT_BEFORE: usize = 16;
+        const CONTEXT_AFTER: usize = 16;
+
+        let cur_index = input.chars().count().saturating_sub(char_iter.count());
+
+        let num_before = cur_index.min(CONTEXT_BEFORE);
+        let context = input
+            .chars()
+            .skip(cur_index - num_before)
+            .take(num_before + CONTEXT_AFTER)
+            .collect::<String>()
+            .replace('\n', " ");
+
+        let mut caret_line = String::new();
+        caret_line.push_str(&" ".repeat(num_before.saturating_sub(1)));
+
+        if ShouldColorize::from_env().should_colorize() {
+            caret_line.push_str(&"^".color(Color::Red).to_string());
+        } else {
+            caret_line.push('^');
+        }
+
+        let remaining_len = context.chars().count().saturating_sub(num_before);
+        if remaining_len > 0 {
+            if ShouldColorize::from_env().should_colorize() {
+                caret_line.push_str(&"~".repeat(remaining_len).color(Color::Red).to_string());
+            } else {
+                caret_line.push_str(&"~".repeat(remaining_len));
+            }
+        }
+
+        format!("Error at line {line}, column {column}: {message}\n{context}\n{caret_line}\n",)
+    }
+
     /// Parse a Symbolica expression, generating a token tree. For most users,
     /// it is recommended to use [crate::parse] instead, which returns an atom.
     pub fn parse(input: &str, settings: ParseSettings) -> Result<Token, String> {
@@ -1141,6 +1192,18 @@ impl Token {
         let mut line_counter = 1;
         let mut column_counter = 1;
 
+        macro_rules! error_context {
+            ($message: expr) => {
+                Token::format_error_context(
+                    &$message,
+                    line_counter,
+                    column_counter,
+                    &input,
+                    char_iter.clone(),
+                )
+            };
+        }
+
         let mut inside_mathematica_full_form = false;
         loop {
             match state {
@@ -1148,9 +1211,7 @@ impl Token {
                     if inside_mathematica_full_form && c == '[' {
                         // convert \[Alpha] to ‖Alpha‖
                         if !id_buffer.ends_with(Symbol::SEP_STR) {
-                            Err(format!(
-                                "Unexpected '{c:?}' in input at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!(format!("unexpected '{c:?}'")))?;
                         }
                     } else if inside_mathematica_full_form && c == ']' {
                         inside_mathematica_full_form = false;
@@ -1207,9 +1268,7 @@ impl Token {
                         }
 
                         if c == '\0' {
-                            Err(format!(
-                                "Missing }} of bracket started at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!("missing }} of bracket"))?;
                         }
 
                         if Token::OPS.contains(&c) || Token::WHITESPACE.contains(&c) {
@@ -1230,9 +1289,7 @@ impl Token {
                     } else {
                         // check for some symbols that could be the result of copy-paste errors
                         // when importing from other languages
-                        Err(format!(
-                            "Unexpected '{c}' in input at line {line_counter} and column {column_counter}"
-                        ))?;
+                        Err(error_context!(format!("unexpected '{c}'")))?;
                     }
                 }
                 ParseState::Number => {
@@ -1338,9 +1395,11 @@ impl Token {
                     }
 
                     if c == '\0' {
-                        Err(format!(
-                            "Missing ] of bracket started at line {line_counter} and column {column_counter}"
-                        ))?;
+                        Err(error_context!("missing ] of bracket"))?;
+                    }
+
+                    if pos == 0 {
+                        Err(error_context!("empty rational polynomial brackets"))?;
                     }
 
                     s.push_str(&start.as_str()[..pos - 1]);
@@ -1453,24 +1512,18 @@ impl Token {
                                 *need_more = true;
                                 args.push(Token::ID(Symbol::SEP_STR.into()));
                             } else {
-                                Err(format!(
-                                    "Unexpected '[' in input at line {line_counter} and column {column_counter}"
-                                ))?;
+                                Err(error_context!("unexpected '['"))?;
                             }
                         } else if settings.mode == ParseMode::Symbolica {
                             state = ParseState::RationalPolynomial;
                         } else {
-                            Err(format!(
-                                "Unexpected '[' in input at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!("unexpected '['"))?;
                         }
                     }
                     ']' => stack.push(Token::CloseBracket),
                     '"' => {
                         if !settings.mode.is_mathematica() {
-                            Err(format!(
-                                "Unexpected '\"' in input at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!("unexpected '\"'"))?;
                         }
 
                         // parse a string as a literal id in the current namespace
@@ -1484,9 +1537,7 @@ impl Token {
                         }
 
                         if c == '\0' {
-                            Err(format!(
-                                "Unexpected 'EOF' in input at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!("unexpected end of file"))?;
                         }
 
                         id_buffer.push(c);
@@ -1521,25 +1572,23 @@ impl Token {
                                 id_buffer.push(c);
                             }
                         } else {
-                            Err(format!(
-                                "Unexpected '{c}' in input at line {line_counter} and column {column_counter}"
-                            ))?;
+                            Err(error_context!(format!("unexpected '{c}'")))?;
                         }
                     }
                 }
             }
 
             // match on triplets of type operator identifier operator
-            while state == ParseState::Any && stack.len() > 2 {
+            while state == ParseState::Any && stack.len() >= 2 {
                 if !unsafe { stack.get_unchecked(stack.len() - 2) }.is_normal() {
                     // check for the empty function
 
                     // check if the left operator needs a right-hand side and the new operator still needs a left-hand side
                     match unsafe { stack.get_unchecked(stack.len() - 1) } {
                         Token::Op(true, _, op, _) => {
-                            Err(format!(
-                                "Error at line {line_counter} and position {column_counter}: operator '{op}' is missing left-hand side",
-                            ))?;
+                            Err(error_context!(format!(
+                                "operator '{op}' is missing left-hand side",
+                            )))?;
                         }
 
                         x @ Token::CloseParenthesis | x @ Token::CloseBracket => {
@@ -1563,34 +1612,34 @@ impl Token {
 
                                     stack.pop();
                                 } else {
-                                    Err(format!(
-                                        "Error at line {} and position {}: unexpected '{}'",
-                                        line_counter,
-                                        column_counter,
+                                    Err(error_context!(format!(
+                                        "unexpected '{}'",
                                         if c == Token::CloseParenthesis {
                                             ")"
                                         } else {
                                             "]"
                                         }
-                                    ))?;
+                                    )))?;
                                 }
                             } else {
-                                Err(format!(
-                                    "Error at line {} and position {}: unexpected '{}'",
-                                    line_counter,
-                                    column_counter,
+                                Err(error_context!(format!(
+                                    "unexpected '{}'",
                                     if c == Token::CloseParenthesis {
                                         ")"
                                     } else {
                                         "]"
                                     }
-                                ))?;
+                                )))?;
                             }
                         }
                         _ => {}
                     }
 
                     // no simplification, get new token
+                    break;
+                }
+
+                if stack.len() == 2 {
                     break;
                 }
 
@@ -1602,18 +1651,11 @@ impl Token {
                     std::cmp::Ordering::Greater => {
                         first
                             .add_right(middle, settings.distribute_neg)
-                            .map_err(|e| {
-                                format!(
-                                    "Error at line {line_counter} and position {column_counter}: "
-                                ) + e.as_str()
-                            })?;
+                            .map_err(|e| error_context!(e))?;
                         stack.push(last);
                     }
                     std::cmp::Ordering::Less => {
-                        last.add_left(middle).map_err(|e| {
-                            format!("Error at line {line_counter} and position {column_counter}: ")
-                                + e.as_str()
-                        })?;
+                        last.add_left(middle).map_err(|e| error_context!(e))?;
 
                         stack.push(last);
                     }
@@ -1634,16 +1676,14 @@ impl Token {
                                 if x == Token::CloseParenthesis && *bracket
                                     || x == Token::CloseBracket && !*bracket
                                 {
-                                    Err(format!(
-                                        "Error at line {} and position {}: unexpected '{}'",
-                                        line_counter,
-                                        column_counter,
+                                    return Err(error_context!(format!(
+                                        "unexpected '{}'",
                                         if x == Token::CloseParenthesis {
                                             ")"
                                         } else {
                                             "]"
                                         }
-                                    ))?;
+                                    )))?;
                                 }
 
                                 if let Token::Op(_, _, Operator::Argument, arg2) = mid {
@@ -1750,17 +1790,17 @@ impl Token {
             Ok(stack.pop().unwrap())
         } else {
             match stack.get(stack.len() - 2) {
-                Some(Token::Op(false, true, op, _)) => Err(format!(
-                    "Unexpected end of input: missing right-hand side for operator '{op}'"
-                )),
-                Some(Token::OpenParenthesis) => {
-                    Err("Unexpected end of input: open parenthesis is not closed".to_string())
-                }
-
-                Some(Token::Fn(true, _, args)) => Err(format!(
-                    "Unexpected end of input: Missing closing parenthesis for function '{}'",
+                Some(Token::Op(true, _, op, _)) => Err(error_context!(format!(
+                    "operator '{op}' is missing left-hand side",
+                ))),
+                Some(Token::Op(false, true, op, _)) => Err(error_context!(format!(
+                    "operator '{op}' is missing right-hand side",
+                ))),
+                Some(Token::OpenParenthesis) => Err(error_context!("missing closing parenthesis")),
+                Some(Token::Fn(true, _, args)) => Err(error_context!(format!(
+                    "missing closing parenthesis for function '{}'",
                     args[0]
-                )),
+                ))),
                 Some(Token::Start) => Err("Expression is empty".to_string()),
                 _ => Err(format!("Unknown parsing error: {stack:?}")),
             }

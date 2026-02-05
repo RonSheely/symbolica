@@ -1162,7 +1162,7 @@ mod test {
         } else {
             assert_eq!(
                 format!("{}", a.printer(PrintOptions::short())),
-                "1/5*f(x,y^2)^(x+z)+3"
+                "3+1/5*f(x,y^2)^(x+z)"
             );
         }
 
