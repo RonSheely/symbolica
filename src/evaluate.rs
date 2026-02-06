@@ -2799,7 +2799,8 @@ extern "C" {{
                 Instr::Pow(o, b, e) => {
                     let base = get_input!(*b);
                     if *e == -1 {
-                        *out += format!("\t{} = T(1) / {base};\n", get_output!(o)).as_str();
+                        *out += format!("\t{} = {number_wrapper}(1) / {base};\n", get_output!(o))
+                            .as_str();
                     } else {
                         *out += format!("\t{} = pow({base}, {e});\n", get_output!(o)).as_str();
                     }
@@ -4574,12 +4575,23 @@ extern "C" {{
                     end_asm_block!(in_asm_block);
                     let base = get_input!(*b);
                     let exp = get_input!(*e);
-                    *out += format!("\tZ[{o}] = pow({base}, {exp});\n").as_str();
+
+                    let suffix = if let ComplexPhase::Real = *c {
+                        ".real()"
+                    } else {
+                        ""
+                    };
+
+                    *out += format!("\tZ[{o}] = pow({base}{suffix}, {exp}{suffix});\n").as_str();
                 }
                 Instr::BuiltinFun(o, s, a) => {
                     end_asm_block!(in_asm_block);
 
-                    let arg = get_input!(*a);
+                    let arg = if let ComplexPhase::Real = *c {
+                        get_input!(*a) + ".real()"
+                    } else {
+                        get_input!(*a)
+                    };
 
                     match s.0.get_id() {
                         Symbol::EXP_ID => {
@@ -4598,7 +4610,11 @@ extern "C" {{
                             *out += format!("\tZ[{o}] = sqrt({arg});\n").as_str();
                         }
                         Symbol::CONJ_ID => {
-                            *out += format!("\tZ[{o}] = conj({arg});\n").as_str();
+                            if let ComplexPhase::Real = *c {
+                                *out += format!("\tZ[{o}] = {arg};\n").as_str();
+                            } else {
+                                *out += format!("\tZ[{o}] = conj({arg});\n").as_str();
+                            }
                         }
                         _ => unreachable!(),
                     }
