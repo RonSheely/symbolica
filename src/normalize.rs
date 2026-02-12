@@ -498,7 +498,7 @@ impl Atom {
 
                     // strip coefficient if it is 1 (can be float)
                     if new_coeff.is_one() {
-                        if len == 2 {
+                        if len == 1 {
                             // downgrade
                             self.set_from_view(&slice2.get(0));
                         } else {
@@ -1509,8 +1509,8 @@ impl AtomView<'_> {
         if *self == rhs {
             let mut a = ws.new_atom();
             let m = a.to_mul();
-            m.extend(*self);
             m.extend(InlineNum::new(2, 1).as_view());
+            m.extend(*self);
             a.as_view().normalize(ws, out);
             return;
         }
